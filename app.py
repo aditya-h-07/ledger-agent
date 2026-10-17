@@ -22,16 +22,9 @@ RATES = {
 }
 
 PRODUCTS = [
-    "Air Fryer",
-    "Blender",
-    "Grinder",
-    "Juicer",
-    "Kettle",
-    "Mixer",
-    "Rice Cooker",
-    "Toaster",
+    "Air Fryer", "Blender", "Grinder", "Juicer",
+    "Kettle", "Mixer", "Rice Cooker", "Toaster",
 ]
-
 REGIONS = ["Central", "East", "North", "South", "West"]
 
 MONTHS = {
@@ -59,16 +52,17 @@ def parse_time(value):
 
 
 def deduplicate_orders(orders):
+    """Keep the latest updated version of each order ID."""
     latest = {}
 
     for order in orders:
         order_id = str(order["id"])
-        current = latest.get(order_id)
+        existing = latest.get(order_id)
 
         if (
-            current is None
+            existing is None
             or parse_time(order["updated_at"])
-            > parse_time(current["updated_at"])
+            > parse_time(existing["updated_at"])
         ):
             latest[order_id] = order
 
@@ -76,25 +70,23 @@ def deduplicate_orders(orders):
 
 
 def load_orders():
+    """Load local ledger data, or fetch it from the API on Render."""
     local_path = Path(__file__).with_name("ledger.jsonl")
 
-    # Use the local dataset during development.
     if local_path.exists():
         orders = []
 
-        with local_path.open("r", encoding="utf-8") as file:
+        with local_path.open(encoding="utf-8") as file:
             for line in file:
                 if line.strip():
                     orders.append(json.loads(line))
 
         return deduplicate_orders(orders)
 
-    # On Render, fetch data using an environment variable.
     root_url = os.environ.get("LEDGER_ROOT_URL")
-
     if not root_url:
         raise RuntimeError(
-            "ledger.jsonl was not found. Set LEDGER_ROOT_URL."
+            "Set LEDGER_ROOT_URL in the environment when ledger.jsonl is absent."
         )
 
     session = requests.Session()
@@ -104,9 +96,8 @@ def load_orders():
     links = response.json().get("links", {})
 
     export_url = links.get("export")
-
     if not export_url:
-        raise RuntimeError("The API did not provide an export link.")
+        raise RuntimeError("The ledger API did not provide an export link.")
 
     response = session.get(export_url, timeout=60)
     response.raise_for_status()
@@ -117,29 +108,29 @@ def load_orders():
         if line.strip()
     ]
 
-    # Fall back to pagination if export data is unexpectedly incomplete.
+    # Fall back to pagination if the export appears incomplete.
     if len(orders) < 100:
         orders = []
         next_url = links.get("orders")
 
         if not next_url:
-            raise RuntimeError("The API did not provide an orders link.")
+            raise RuntimeError("The ledger API did not provide an orders link.")
 
         while next_url:
             response = session.get(next_url, timeout=30)
             response.raise_for_status()
-
             page = response.json()
+
             orders.extend(page.get("orders", []))
             next_url = page.get("next")
 
     if not orders:
-        raise RuntimeError("The API returned no order records.")
+        raise RuntimeError("The ledger API returned no order records.")
 
     return deduplicate_orders(orders)
 
 
-# Initialize the data before the endpoints use ORDERS.
+# Initialize ORDERS before the endpoints use it.
 ORDERS = load_orders()
 
 
@@ -147,7 +138,7 @@ def amount_usd(order):
     currency = str(order.get("currency", "USD")).upper()
 
     if currency not in RATES:
-        raise ValueError(f"Unknown currency: {currency}")
+        raise ValueError(f"Unsupported currency: {currency}")
 
     amount = Decimal(str(order.get("amount", 0)))
     return amount * RATES[currency]
@@ -155,10 +146,7 @@ def amount_usd(order):
 
 def money(value):
     return float(
-        value.quantize(
-            Decimal("0.01"),
-            rounding=ROUND_HALF_UP,
-        )
+        value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     )
 
 
@@ -167,7 +155,7 @@ def extract_filters(question):
     start = None
     end = None
 
-    # Match month and year, for example March 2026.
+    # Match a month and year, such as March 2026.
     for month_name, month_number in MONTHS.items():
         match = re.search(
             rf"\b{month_name}\s+((?:19|20)\d{{2}})\b",
@@ -184,7 +172,6 @@ def extract_filters(question):
                 end = datetime(
                     year, month_number + 1, 1, tzinfo=TZ
                 )
-
             break
 
     # Match a year without a month.
@@ -199,10 +186,7 @@ def extract_filters(question):
     customer_match = re.search(
         r"\bC\d{4}\b", question, re.IGNORECASE
     )
-    customer = (
-        customer_match.group(0).upper()
-        if customer_match else None
-    )
+    customer = customer_match.group(0).upper() if customer_match else None
 
     product = next(
         (item for item in PRODUCTS if item.lower() in q),
@@ -226,6 +210,7 @@ def answer_question(question):
     start, end, customer, product, region = extract_filters(question)
     rows = list(ORDERS)
 
+    # Apply entity filters.
     if customer:
         rows = [
             order for order in rows
@@ -244,6 +229,7 @@ def answer_question(question):
             if str(order.get("region", "")).lower() == region.lower()
         ]
 
+    # Apply date filters using Asia/Kolkata time.
     if start or end:
         filtered = []
 
@@ -252,7 +238,6 @@ def answer_question(question):
 
             if start and order_time < start:
                 continue
-
             if end and order_time >= end:
                 continue
 
@@ -260,6 +245,7 @@ def answer_question(question):
 
         rows = filtered
 
+    # Identify the requested metric and relevant statuses.
     is_refund = any(
         word in q
         for word in ("refund", "refunded", "return", "returned")
@@ -276,20 +262,19 @@ def answer_question(question):
             if order.get("status") == "refunded"
         ]
     elif asks_revenue:
+        # Only paid orders count toward revenue.
         rows = [
             order for order in rows
             if order.get("status") == "paid"
         ]
 
-    # Identify questions asking for a leading product or customer.
+    # Determine whether the question asks for a leading product/customer.
     group_field = None
 
     if re.search(r"\b(which|what)\s+(product|item)s?\b", q):
         group_field = "product"
-
     elif re.search(r"\b(which|what)\s+customers?\b", q):
         group_field = "customer"
-
     elif re.search(
         r"\b(top|highest|most|best|largest|greatest)\b", q
     ):
@@ -308,17 +293,26 @@ def answer_question(question):
         if not groups:
             return None
 
+        asks_count = (
+            "count" in q
+            or "number of orders" in q
+            or "most orders" in q
+        )
+        asks_quantity = "unit" in q or "quantity" in q
+
         def score(items):
-            if (
-                "count" in q
-                or "number of orders" in q
-                or "most orders" in q
-            ):
+            if asks_count:
                 return Decimal(len(items))
 
-            if "unit" in q or "quantity" in q:
+            if asks_quantity:
+                # For units sold, count only paid orders.
+                eligible = (
+                    [item for item in items if item.get("status") == "paid"]
+                    if asks_revenue
+                    else items
+                )
                 return Decimal(
-                    sum(int(item.get("qty", 0)) for item in items)
+                    sum(int(item.get("qty", 0)) for item in eligible)
                 )
 
             return sum(
@@ -332,20 +326,14 @@ def answer_question(question):
 
         ranked = sorted(
             groups.items(),
-            key=lambda pair: (
-                score(pair[1]),
-                pair[0].lower(),
-            ),
+            key=lambda pair: (score(pair[1]), pair[0].lower()),
             reverse=True,
         )
 
         return ranked[0][0]
 
     # Count orders or distinct customers.
-    if any(
-        phrase in q
-        for phrase in ("how many", "count", "number of")
-    ):
+    if any(phrase in q for phrase in ("how many", "count", "number of")):
         if "customer" in q and (
             "unique" in q or "distinct" in q
         ):
@@ -353,9 +341,21 @@ def answer_question(question):
 
         return len(rows)
 
-    # Sum the number of units.
+    # Calculate quantity/units separately so other questions cannot
+    # accidentally return a quantity instead of a monetary answer.
     if "quantity" in q or re.search(r"\bunits?\b", q):
-        return sum(int(order.get("qty", 0)) for order in rows)
+        quantity_rows = rows
+
+        if asks_revenue:
+            quantity_rows = [
+                order for order in rows
+                if order.get("status") == "paid"
+            ]
+
+        return sum(
+            int(order.get("qty", 0))
+            for order in quantity_rows
+        )
 
     # Average paid order value.
     if "average" in q or "mean" in q:
@@ -374,7 +374,8 @@ def answer_question(question):
 
         return money(total / len(eligible))
 
-    # Default: total amount in USD for the selected rows.
+    # Sum monetary values in USD.
+    # Revenue questions have already been restricted to paid orders.
     total = sum(
         (amount_usd(order) for order in rows),
         Decimal("0"),
@@ -403,11 +404,6 @@ def health():
 @app.post("/")
 def ask(request: Question):
     try:
-        answer = answer_question(request.question)
-        return {"answer": answer}
-
+        return {"answer": answer_question(request.question)}
     except (ValueError, KeyError, ArithmeticError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        )
+        raise HTTPException(status_code=400, detail=str(exc))
