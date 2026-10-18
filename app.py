@@ -83,7 +83,8 @@ def load_orders():
 
         return deduplicate_orders(orders)
 
-    root_url = os.environ.get("LEDGER_ROOT_URL")
+    root_url = os.environ.get("LEDGER_ROOT_URL", "").strip()
+    root_url = root_url.rstrip("\r\n")
     if not root_url:
         raise RuntimeError(
             "Set LEDGER_ROOT_URL in the environment when ledger.jsonl is absent."
