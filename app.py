@@ -334,7 +334,11 @@ def answer_question(question):
         return ranked[0][0]
 
     # Count orders or distinct customers.
-    if any(phrase in q for phrase in ("how many", "count", "number of")):
+    if (
+    "average" not in q
+    and "mean" not in q
+    and any(phrase in q for phrase in ("how many", "count", "number of"))
+    ):
         if "customer" in q and (
             "unique" in q or "distinct" in q
         ):
