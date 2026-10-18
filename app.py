@@ -362,7 +362,7 @@ def answer_question(question: str):
     ):
         if (
             "customer" in q
-            and any(word in q for word in ("unique", "distinct"))
+            and any(word in q for word in ("unique", "distinct","different"))
         ):
             customers = {
                 str(order["customer"])
