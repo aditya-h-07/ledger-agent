@@ -253,8 +253,8 @@ def answer_question(question):
     )
 
     asks_revenue = any(
-        word in q
-        for word in ("revenue", "sales", "sold", "earned", "income")
+    word in q
+    for word in ("revenue", "sales", "sold", "earned", "earn", "income")
     )
 
     if is_refund:
